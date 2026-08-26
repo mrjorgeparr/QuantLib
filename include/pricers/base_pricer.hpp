@@ -1,7 +1,9 @@
 #ifndef BASE_PRICER_HPP
 #define BASE_PRICER_HPP
 
+#include "instruments/american_option.hpp"
 #include "instruments/base_option.hpp"
+#include "instruments/european_option.hpp"
 
 #include <random>
 #include <vector>
@@ -16,6 +18,10 @@ protected:
 public:
     BasePricer(int timeSteps, int paths);
     virtual ~BasePricer() = default;
+
+    double price(const EuropeanOption& option);
+    double price(const AmericanOption& option);
+    double priceArithmeticAsian(const BaseOption& option);
 
 protected:
     void generateGBMPaths(
