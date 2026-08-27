@@ -14,7 +14,7 @@ private:
 public:
     EuropeanPricer(int timeSteps, int paths);
 
-    double price(const EuropeanOption& option);
+    double price_mc(const EuropeanOption& option);
 };
 
 #endif // LSMC_HPP

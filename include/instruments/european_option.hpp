@@ -3,28 +3,18 @@
 
 #include "instruments/base_option.hpp"
 
-//#include <vector>
-//#include <random>
-
+// A European option is fully described by its contract terms (BaseOption).
+// Discretisation -- time steps and path count -- belongs to the pricer, not here.
+// This type exists so BasePricer can overload on the exercise style.
 class EuropeanOption : public BaseOption {
-private:
-    int N;              // Number of time steps
-    int M;              // Number of Monte Carlo paths
-    double dt;          // Time step
-    
-
-    
 public:
     // Constructor
-    EuropeanOption(double S0, double K, double r, double sigma, double T, 
-                       int N, int M, bool isPut = true);
-    
+    EuropeanOption(double S0, double K, double r, double sigma, double T,
+                   bool isPut = true);
 
     // Getters
     double getS0() const { return getTicker().getS0(); }
     double getSigma() const { return getTicker().getSigma(); }
-    
-
 };
 
-#endif // AMERICAN_OPTION_HPP
+#endif // EUROPEAN_OPTION_HPP

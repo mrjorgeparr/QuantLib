@@ -16,6 +16,8 @@ One engine, `BasePricer`, generates geometric Brownian motion paths and prices t
 | `price(const AmericanOption&)` | American call/put | Longstaff–Schwartz (LSMC) least-squares regression |
 | `priceArithmeticAsian(const BaseOption&)` | Arithmetic-average Asian | Path-average Monte Carlo |
 
+`Greeks` layers delta, gamma, vega, rho and theta on top of any of them by finite differences.
+
 No external dependencies. No BLAS, no Boost — the least-squares solve is hand-rolled (normal equations + Gaussian elimination with partial pivoting) over four Laguerre basis functions.
 
 ---
@@ -48,9 +50,9 @@ Produces `libMyQuantLib.a` in the project root.
 #include <cstdio>
 
 int main() {
-    //                  S0      K      r    sigma   T   N     M     isPut
-    EuropeanOption euro(100.0, 100.0, 0.05, 0.20, 1.0, 50, 100000, true);
-    AmericanOption amer(100.0, 100.0, 0.05, 0.20, 1.0, 50, 100000, true);
+    //                  S0      K      r    sigma   T   isPut
+    EuropeanOption euro(100.0, 100.0, 0.05, 0.20, 1.0, true);
+    AmericanOption amer(100.0, 100.0, 0.05, 0.20, 1.0, true);
 
     BasePricer pricer(/*timeSteps=*/50, /*paths=*/100000);
 
@@ -78,14 +80,14 @@ include/
 │   └── ticker.hpp           Ticker — the underlying asset: (S0, sigma)
 ├── instruments/
 │   ├── base_option.hpp      BaseOption — the contract: Ticker + K, r, T, isPut, payoff()
-│   ├── european_option.hpp  EuropeanOption : BaseOption
-│   └── american_option.hpp  AmericanOption : BaseOption
+│   ├── european_option.hpp  EuropeanOption : BaseOption  (exercise-style tag type)
+│   └── american_option.hpp  AmericanOption : BaseOption  (exercise-style tag type)
+├── greeks/
+│   └── greeks.hpp          Greeks — finite-difference sensitivities
 ├── math/
 │   └── lsmc_utils.hpp       MathUtils — Laguerre basis, least squares, Gaussian elimination
 └── pricers/
-    ├── base_pricer.hpp      BasePricer — the pricing engine (paths + all three methods)
-    ├── european_pricer.hpp  (declaration only — see Known gaps)
-    └── lsmc.hpp             (declaration only — see Known gaps)
+    └── base_pricer.hpp      BasePricer — the pricing engine (paths + all three methods)
 
 src/                         mirrors include/, one .cpp per header that needs one
 deprecated/pricers/          pre-refactor pricers, NOT compiled
@@ -120,6 +122,73 @@ Standard backward induction:
 5. Discount the surviving cash flows at `t=1` back to today.
 
 The regression is skipped when fewer than `BASIS_FUNCTIONS_COUNT` paths are in the money — with 4 unknowns and 4 or fewer observations the normal-equations matrix is singular.
+
+---
+
+## Greeks
+
+`Greeks` computes delta, gamma, vega, rho and theta by finite differences, driving whatever pricer you hand it.
+
+```cpp
+#include "greeks/greeks.hpp"
+
+EuropeanOption euro(100.0, 100.0, 0.05, 0.20, 1.0, true);
+BasePricer pricer(50, 200000);
+
+Greeks greeks(euro, pricer);        // works with any instrument the pricer prices
+greeks.setSeed(20260827u);          // optional: makes the run reproducible
+
+GreekSet g = greeks.all();          // or greeks.delta(), greeks.vega(), ...
+printf("delta %.4f  gamma %.5f  vega %.2f\n", g.delta, g.gamma, g.vega);
+```
+
+Validated against closed-form Black-Scholes (S=K=100, r=5%, sigma=20%, T=1, 200k paths):
+
+| | Greeks | Black-Scholes | error |
+| --- | ---: | ---: | ---: |
+| price | 5.60079 | 5.57353 | +0.49% |
+| delta | -0.36480 | -0.36317 | -0.45% |
+| gamma | 0.01874 | 0.01876 | -0.11% |
+| vega | 37.68755 | 37.52403 | +0.44% |
+| rho | -42.07588 | -41.89046 | -0.44% |
+| theta | -1.66527 | -1.65788 | -0.45% |
+
+### Only the constructor is a template
+
+`BasePricer::price` is a set of compile-time **overloads** — it dispatches on the *static* type of its argument. A member of type `BaseOption` would both slice the object and match no overload.
+
+`Greeks` solves that without becoming a template itself. The contract lives in a plain `BaseOption option_` member, and bumped scenarios are built with `BaseOption` and `Ticker` — `setTicker`, `setK`, `setR`, `setT`, and their validation. Nothing about the contract is re-modelled.
+
+Only the *dispatch* needs the concrete type, so only the constructor is templated: it seals a copy of the instrument in a `std::function<double(const BaseOption&)>` that transplants bumped terms onto a correctly-typed copy and calls `price()`. That one function is the entire cost of the overload set; every finite-difference method is ordinary code in `src/greeks/greeks.cpp`.
+
+Two payoffs. `Greeks` is one plain type, so `std::vector<Greeks>` holds European and American positions side by side. And because the lambda copies the *concrete* option each call, an instrument that later carries its own state (a barrier level, an averaging schedule) keeps it — a sliced `BaseOption` would not. The cost is one indirect call per pricing, nothing against a 200k-path Monte Carlo.
+
+### Common random numbers are not optional
+
+Each Greek is a difference of two Monte Carlo estimates divided by a small bump. If the two legs use independent draws, their sampling error does not cancel and the division amplifies what remains. Measured on this library, delta with an *absolute* 0.01 bump and independent draws:
+
+| | mean | std dev | observed range |
+| --- | ---: | ---: | --- |
+| Independent draws | -0.207 | 2.027 | [-4.09, +2.29] |
+| Common random numbers | -0.3631 | 0.0014 | [-0.365, -0.361] |
+
+A put delta is confined to [-1, 0]; the first row gets the *sign* wrong about a third of the time. `Greeks` therefore pins the seed on both legs by default (`setCommonRandomNumbers(false)` disables it, which is useful only for demonstrating the above). This is what `BasePricer::setSeed` exists for. A `SeedGuard` restores the pricer seed state on scope exit, so computing Greeks never leaves a caller pricer reconfigured.
+
+### Bump sizes and units
+
+Spot bumps are **relative** (a fraction of S0); the rest are absolute. Gamma gets a larger default bump than delta because the second difference divides by `h^2`, which amplifies noise quadratically — at a 1%-of-spot bump gamma carries ~16% noise even with CRN, versus ~0.7% at 5%.
+
+| Greek | default bump | units of the result |
+| --- | --- | --- |
+| delta | 1% of spot | per unit of spot |
+| gamma | 5% of spot | per unit of spot squared |
+| vega | 0.01 vol | per 1.0 of vol (divide by 100 for per vol point) |
+| rho | 0.001 | per 1.0 of rate (divide by 10000 for per bp) |
+| theta | 1/365 year | per year (divide by 365 for per day) |
+
+Override with `GreekBumps` via the three-argument constructor or `setBumps`. Vega and theta fall back to a one-sided difference when the bump would push sigma or the maturity through zero.
+
+`all()` costs 10 pricer calls; the individual accessors cost 1-3 each. With the LSMC hot spot in place, a full American `all()` at 100k paths is several minutes — worth fixing gap 2 first if you plan to work with American Greeks.
 
 ---
 
@@ -189,16 +258,21 @@ A *target-specific variable*: `-g -DDEBUG` is appended to `CXXFLAGS` only for th
 
 An honest list of what is unfinished, roughly in priority order.
 
-1. **`EuropeanPricer` and `LSMC` are declared but not defined.** `include/pricers/european_pricer.hpp` and `include/pricers/lsmc.hpp` still ship, but their implementations were moved to `deprecated/pricers/` during the refactor that folded everything into `BasePricer` — and `deprecated/` is not compiled. Including either header and instantiating the class gives an undefined-reference link error. (`deprecated/pricers/european_pricer.cpp` is empty.) Either delete both headers or reinstate them as thin wrappers.
-2. **`build/` is committed to git** — roughly 100 MSVC/MSBuild artifacts, including stale objects from before the refactor. Add a `.gitignore` (`build/`, `obj/`, `*.a`, `*.lib`, `*.obj`, `*.o`) and `git rm -r --cached build`.
-3. **Discretisation parameters are duplicated and inert.** `EuropeanOption` and `AmericanOption` each store `N`, `M`, `dt`, but `BasePricer` ignores them and uses its own `timeSteps_`/`paths_`. Those constructor arguments silently do nothing — a real trap for a caller. Drop them from the instruments (they belong to the pricer) or have the pricer read them.
-4. **`AmericanOption` carries an unused RNG.** `gen` and `norm_dist` are leftovers from when the instrument priced itself; path generation now lives in `BasePricer`.
-5. **LSMC has a quadratic hot spot.** The "roll forward the out-of-the-money paths" step does a linear scan of `inMoneyIndices` for every path (`src/pricers/base_pricer.cpp`, the `for (int index : inMoneyIndices)` loop) — O(paths × in-the-money paths) per time step. Replacing it with a `std::vector<char>` membership mask is a large speedup at high path counts.
-6. **`BasePricer::price` overloads are not virtual**, despite the `virtual ~BasePricer()`. The polymorphism the destructor implies is not actually wired up. Decide: plain overloads on a concrete class, or a virtual `price(const BaseOption&)` interface.
-7. **`/openmp` is set twice on MSVC** — once in `CMAKE_CXX_FLAGS_RELEASE`, once via `OpenMP::OpenMP_CXX`. Harmless, but drop it from the manual flags.
-8. **No Greeks.** `constants.hpp` defines finite-difference bump sizes (`FINITE_DIFF_BUMP_PRICE`, `..._VOL`, `..._RATE`, `..._TIME`) but nothing uses them — delta/vega/rho/theta were planned and never written.
-9. **No tests, no benchmarks, no CI.** The European price can be validated against closed-form Black–Scholes; that is the obvious first test.
-10. **Results are not reproducible.** There is no way to fix the seed. A seeded `BasePricer` constructor would make runs deterministic and testable.
+1. **`AmericanOption` carries an unused RNG.** `gen` and `norm_dist` are leftovers from when the instrument priced itself; path generation now lives in `BasePricer::generateGBMPaths`. They are marked `TODO(unused)` in the header. Removing them also lets `<random>` drop out of the header.
+2. **LSMC has a quadratic hot spot.** The "roll forward the out-of-the-money paths" step does a linear scan of `inMoneyIndices` for every path (`src/pricers/base_pricer.cpp`, the `for (int index : inMoneyIndices)` loop) — O(paths x in-the-money paths) per time step. Replacing it with a `std::vector<char>` membership mask makes it O(paths) and is a large speedup at high path counts.
+3. **`BasePricer::price` overloads are not virtual**, despite the `virtual ~BasePricer()`. The polymorphism the destructor implies is not actually wired up. Decide: plain overloads on a concrete class, or a virtual `price(const BaseOption&)` interface.
+4. **`/openmp` is set twice on MSVC** — once in `CMAKE_CXX_FLAGS_RELEASE`, once via `OpenMP::OpenMP_CXX`. Harmless, but drop it from the manual flags.
+5. **No tests, no benchmarks, no CI.** `Greeks` can be validated against closed-form Black-Scholes (it currently agrees to within 0.5% on every Greek); that is the obvious first test to commit.
+6. **Gamma on short-dated or far out-of-the-money options** may need a bump size other than the 5%-of-spot default — the bias/variance tradeoff moves with the contract.
+7. **Everything is in the global namespace.** `Ticker` in particular is a name that will collide. Worth fixing at the same time as the rename.
+
+### Recently resolved
+
+- Orphaned `EuropeanPricer` / `LSMC` declarations moved out of `include/pricers/` into `deprecated/`, so including a header with no definition is no longer possible.
+- `build/` untracked from git and a `.gitignore` added.
+- `N`, `M` and `dt` removed from `EuropeanOption` / `AmericanOption`. They were stored but ignored by `BasePricer`, so those constructor arguments silently did nothing. Discretisation now lives only on the pricer.
+- `BasePricer::setSeed` / `clearSeed` added, so a run can be made reproducible. This was a prerequisite for the Greeks, not just a convenience — see below.
+- Greeks implemented in `Greeks` (`include/greeks/greeks.hpp`, `src/greeks/greeks.cpp`).
 
 ---
 

@@ -11,7 +11,9 @@
 BasePricer::BasePricer(int timeSteps, int paths)
     : timeSteps_(timeSteps),
       paths_(paths),
-      gen_(std::random_device{}()) {
+      gen_(std::random_device{}()),
+      fixedSeed_(0),
+      useFixedSeed_(false) {
     if (timeSteps_ <= 0) {
         throw std::invalid_argument("Pricer time steps must be positive");
     }
@@ -19,6 +21,15 @@ BasePricer::BasePricer(int timeSteps, int paths)
     if (paths_ <= 0) {
         throw std::invalid_argument("Pricer path count must be positive");
     }
+}
+
+void BasePricer::setSeed(std::mt19937::result_type seed) {
+    fixedSeed_ = seed;
+    useFixedSeed_ = true;
+}
+
+void BasePricer::clearSeed() {
+    useFixedSeed_ = false;
 }
 
 double BasePricer::price(const EuropeanOption& option) {
@@ -150,7 +161,7 @@ void BasePricer::generateGBMPaths(
     double dt,
     std::vector<std::vector<double>>& assetPaths
 ) {
-    const auto seed = gen_();
+    const std::mt19937::result_type seed = useFixedSeed_ ? fixedSeed_ : gen_();
     const double S0 = option.getTicker().getS0();
     const double r = option.getR();
     const double sigma = option.getTicker().getSigma();
