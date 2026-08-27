@@ -1,5 +1,5 @@
 #include "pricers/lsmc.hpp"
-
+// old structure
 #include "core/constants.hpp"
 #include "math/lsmc_utils.hpp"
 

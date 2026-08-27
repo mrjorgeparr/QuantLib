@@ -2,7 +2,7 @@
 CXX = g++
 CXXFLAGS = -std=c++11 -O3 -Wall -Wextra -fopenmp
 INCLUDES = -Iinclude
-TARGET = libMyQuantLib.a
+TARGET = libIto.a
 SRCDIR = src
 INCDIR = include
 OBJDIR = obj

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(MyQuantLib)
+project(Ito)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 11)
@@ -26,11 +26,11 @@ include_directories(include)
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
 # Create library
-add_library(MyQuantLib STATIC ${SOURCES})
+add_library(Ito STATIC ${SOURCES})
 
 # Link OpenMP
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(MyQuantLib PUBLIC OpenMP::OpenMP_CXX)
+    target_link_libraries(Ito PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
-target_include_directories(MyQuantLib PUBLIC include)
+target_include_directories(Ito PUBLIC include)
