@@ -57,7 +57,7 @@ int main() {
     BasePricer pricer(/*timeSteps=*/50, /*paths=*/100000);
 
     printf("European put: %.4f\n", pricer.price(euro));                 // ~5.57  (Black-Scholes 5.5735)
-    printf("American put: %.4f\n", pricer.price(amer));                 // ~6.25  (early-exercise premium)
+    printf("American put: %.4f\n", pricer.price(amer));                 // ~6.05  (binomial reference ~6.09)
     printf("Asian put   : %.4f\n", pricer.priceArithmeticAsian(euro));  // ~3.38
     return 0;
 }
@@ -94,14 +94,15 @@ include/
 │   ├── european_option.hpp  EuropeanOption : BaseOption  (exercise-style tag type)
 │   └── american_option.hpp  AmericanOption : BaseOption  (exercise-style tag type)
 ├── pricers/
-│   └── base_pricer.hpp      BasePricer — path generation and all three pricing methods
+│   ├── base_pricer.hpp      BasePricer — path generation and all three pricing methods
+│   └── lsmc.hpp             LSMC : BasePricer — standalone Longstaff–Schwartz (work in progress)
 ├── greeks/
 │   └── greeks.hpp           Greeks — finite-difference sensitivities
 └── math/
     └── lsmc_utils.hpp       MathUtils — Laguerre basis, least squares, Gaussian elimination
 
 src/                         mirrors include/
-deprecated/                  pre-refactor pricers, NOT compiled
+deprecated/                  pre-refactor pricers, NOT compiled (their LSMC predates the discounting fix)
 ```
 
 Three concerns are kept apart deliberately:
@@ -135,10 +136,21 @@ Backward induction over the path set:
 1. Set terminal cash flows to the terminal payoff.
 2. Walk backwards from `N-1` to `1`. At each date, take only the in-the-money paths.
 3. Regress discounted future cash flow on `{1, L0(x), L1(x), L2(x)}` where `x = S/K`. Scaling by moneyness keeps the exponential basis numerically well behaved.
-4. Exercise where immediate payoff beats the fitted continuation value; otherwise roll the cash flow forward.
-5. Discount the surviving cash flows at `t=1` back to today.
+4. Exercise where immediate payoff beats the fitted continuation value; otherwise carry the `t+1` value back one step, discounted by `exp(-r*dt)`.
+5. Discount the cash flows at `t=1` back to today.
+
+`cashFlows[i][t]` always holds the path's value **as of date `t`**. Every copy from `t+1` to `t` (continuing in-the-money paths, out-of-the-money paths, and dates where the regression is skipped) must multiply by `exp(-r*dt)`. Leave out that factor and a payoff at maturity reaches today discounted by one step instead of `N`, overpricing by roughly `e^{rT}`.
 
 The regression is skipped when four or fewer paths are in the money — with four unknowns the normal-equations matrix would be singular.
+
+**Validation.** S=K=100, r=5%, σ=20%, T=1, 50 steps, 100k paths:
+
+| | LSMC | reference |
+| --- | ---: | ---: |
+| American call | 10.437 | 10.451 (= European call: early exercise never pays without dividends) |
+| American put | 6.051 | ~6.09 (binomial) |
+
+The call is the sharper check. It must match Black–Scholes, so any gap means the discounting or exercise logic is wrong. LSMC typically comes in slightly *below* the true American price because the regression yields a suboptimal exercise rule.
 
 ---
 
@@ -260,13 +272,14 @@ Note the Makefile compiles with `-Wall -Wextra` while the CMake build does not �
 Roughly in priority order.
 
 1. **`AmericanOption` carries an unused RNG.** `gen` and `norm_dist` are leftovers from when the instrument priced itself; path generation now lives in `BasePricer::generateGBMPaths`. Marked `TODO(unused)` in the header. Removing them also lets `<random>` drop out of that header.
-2. **LSMC has a quadratic hot spot.** The "roll forward the out-of-the-money paths" step linearly scans `inMoneyIndices` for every path (`src/pricers/base_pricer.cpp`), giving O(paths × in-the-money paths) per time step. A `std::vector<char>` membership mask makes it O(paths). Measured: at 100k paths an American price drops from 22.0s to 1.5s, and scaling goes from ~4.7× per doubling to ~2.2×. This currently caps usable path counts, and matters more now that a full `all()` costs ten pricings.
-3. **`BasePricer::price` overloads are not virtual**, despite the `virtual ~BasePricer()`. The polymorphism the destructor implies is not wired up. Decide: plain overloads on a concrete class, or a virtual `price(const BaseOption&)` interface — the latter would also let `Greeks` drop its templated constructor entirely.
-4. **`/openmp` is set twice on MSVC** — once in `CMAKE_CXX_FLAGS_RELEASE`, once via `OpenMP::OpenMP_CXX`. Harmless, but drop it from the manual flags.
-5. **No tests, no benchmarks, no CI.** The Black–Scholes comparison above is the obvious first test to commit.
-6. **Gamma bump sizing** may need tuning away from the 5%-of-spot default for short-dated or far out-of-the-money contracts; the bias/variance tradeoff moves with the contract.
-7. **Everything is in the global namespace.** `Ticker` in particular will collide. `namespace ito { ... }` is the natural fix.
-8. **Only first- and second-order Greeks.** No vanna, volga, charm, or speed.
+2. **LSMC is implemented twice.** `LSMC::price` (`src/pricers/lsmc.cpp`) is a copy of `BasePricer::price(const AmericanOption&)`, so every fix has to be made in both. It also hides the base class's other `price` overloads, so `LSMC` cannot price a `EuropeanOption`. Keep one.
+3. **LSMC has a quadratic hot spot.** The step that carries out-of-the-money paths back one date linearly scans `inMoneyIndices` for every path (in both LSMC implementations), giving O(paths × in-the-money paths) per time step. A `std::vector<char>` membership mask makes it O(paths). Measured: at 100k paths an American price drops from 22.0s to 1.5s, and scaling goes from ~4.7× per doubling to ~2.2×. This currently caps usable path counts, and matters more now that a full `all()` costs ten pricings.
+4. **`BasePricer::price` overloads are not virtual**, despite the `virtual ~BasePricer()`. The polymorphism the destructor implies is not wired up. Decide: plain overloads on a concrete class, or a virtual `price(const BaseOption&)` interface — the latter would also let `Greeks` drop its templated constructor entirely.
+5. **`/openmp` is set twice on MSVC** — once in `CMAKE_CXX_FLAGS_RELEASE`, once via `OpenMP::OpenMP_CXX`. Harmless, but drop it from the manual flags.
+6. **No tests, no benchmarks, no CI.** The Black–Scholes comparison above is the obvious first test to commit.
+7. **Gamma bump sizing** may need tuning away from the 5%-of-spot default for short-dated or far out-of-the-money contracts; the bias/variance tradeoff moves with the contract.
+8. **Everything is in the global namespace.** `Ticker` in particular will collide. `namespace ito { ... }` is the natural fix.
+9. **Only first- and second-order Greeks.** No vanna, volga, charm, or speed.
 
 ---
 

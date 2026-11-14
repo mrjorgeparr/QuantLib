@@ -119,7 +119,7 @@ double BasePricer::price(const AmericanOption& option) {
                         cashFlows[i][s] = 0.0;
                     }
                 } else {
-                    cashFlows[i][t] = cashFlows[i][t + 1];
+                    cashFlows[i][t] = cashFlows[i][t + 1] * std::exp(-r * dt);
                 }
             }
 
@@ -135,13 +135,13 @@ double BasePricer::price(const AmericanOption& option) {
                 }
 
                 if (!inMoney) {
-                    cashFlows[i][t] = cashFlows[i][t + 1];
+                    cashFlows[i][t] = cashFlows[i][t + 1] * std::exp(-r * dt);
                 }
             }
         } else {
             #pragma omp parallel for
             for (int i = 0; i < paths_; ++i) {
-                cashFlows[i][t] = cashFlows[i][t + 1];
+                cashFlows[i][t] = cashFlows[i][t + 1] * std::exp(-r * dt);
             }
         }
     }
